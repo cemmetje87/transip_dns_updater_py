@@ -81,12 +81,40 @@ source .venv/bin/activate
 pytest
 ```
 
-## 7. Automating with cron
+## 7. Legacy variant for constrained / ARM systems
+
+If your device cannot build or install `cryptography` (common on older ARMv7 NAS devices such as Marvell Armada XP systems), use the legacy updater:
+
+```bash
+# Only requests is required; no python-transip / cryptography
+python3 -m venv .venv
+source .venv/bin/activate
+pip install requests
+
+./transip_updater_legacy.py --list
+./transip_updater_legacy.py --dry-run
+```
+
+Requirements for the legacy script:
+- Python 3.8+
+- `requests`
+- The `openssl` CLI binary installed on the device
+- The same `config.ini` and `private.key` used by `main.py`
+
+The legacy script uses the `openssl` CLI to RSA-SHA512-sign the TransIP authentication request and talks to the TransIP REST API directly.
+
+## 8. Automating with cron
 
 After verifying the updater works, add it to your crontab, for example every 5 minutes:
 
 ```cron
 */5 * * * * cd /path/to/transip_dns_updater_py && /path/to/transip_dns_updater_py/.venv/bin/python main.py >> /var/log/transip_dns_updater.log 2>&1
+```
+
+For the legacy variant:
+
+```cron
+*/5 * * * * cd /path/to/transip_dns_updater_py && /path/to/transip_dns_updater_py/.venv/bin/python transip_updater_legacy.py >> /var/log/transip_dns_updater.log 2>&1
 ```
 
 Make sure the `config.ini` and `private.key` paths are readable by the cron user.

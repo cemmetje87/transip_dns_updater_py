@@ -19,6 +19,19 @@ address and updates a DNS record in your TransIP account when the IP changes.
 - Fails over across multiple public IP discovery services when one is exhausted.
 - Retry behavior is configurable via `max_retries`, `retry_backoff`, and `retry_max_delay` in `config.ini`.
 
+## Legacy variant for constrained / ARM systems
+
+`main.py` uses `python-transip`, which pulls in the `cryptography` package. On some older or low-resource ARM systems (for example Marvell Armada XP based NAS devices), `cryptography` either has no prebuilt wheel or takes too long memory to compile.
+
+For those systems use `transip_updater_legacy.py` instead. It has the same CLI and config file, but uses only the standard library plus `requests`, and calls the `openssl` CLI for RSA-SHA512 signing. You still need an `openssl` binary on the device.
+
+```bash
+# Only install requests (no python-transip / cryptography)
+pip install requests
+./transip_updater_legacy.py --list
+./transip_updater_legacy.py --dry-run
+```
+
 ## Quick start
 
 See [INSTALL.md](INSTALL.md) for detailed setup instructions.
