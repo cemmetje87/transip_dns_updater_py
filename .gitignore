@@ -1,0 +1,5 @@
+private.key
+config.ini
+.venv
+__pycache__/
+*.pyc
