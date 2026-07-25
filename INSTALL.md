@@ -27,6 +27,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Or install the project directly:
+
+```bash
+pip install -e .
+```
+
 ## 4. Configure credentials
 
 Copy your TransIP private key into the project directory:
@@ -42,10 +48,10 @@ Create a `config.ini` from this template:
 [config]
 username = your_transip_username
 private_key_path = ./private.key
-# domain =               # Optional. If omitted, the first domain is used.
+# domain = example.com    # Optional. If omitted, the first domain is used.
 recordname = @
 recordtype = A
-ip_url = https://ipecho.net/plain
+ip_services = https://ipecho.net/plain,https://ifconfig.me/ip,https://api.ipify.org
 ```
 
 `config.ini` and `private.key` are `.gitignore`d and must never be committed.
@@ -61,8 +67,16 @@ python3 main.py
 
 - `--dry-run` — show what would be changed without updating.
 - `--list` — list the DNS records for the selected domain and exit.
+- `-v` — enable debug logging.
 
-## Automating with cron
+## 6. Run tests
+
+```bash
+source .venv/bin/activate
+pytest
+```
+
+## 7. Automating with cron
 
 After verifying the updater works, add it to your crontab, for example every 5 minutes:
 
