@@ -51,7 +51,12 @@ private_key_path = ./private.key
 # domain = example.com    # Optional. If omitted, the first domain is used.
 recordname = @
 recordtype = A
-ip_services = https://ipecho.net/plain,https://ifconfig.me/ip,https://api.ipify.org
+ip_services = https://ipecho.net/plain,https://ifconfig.me/ip,https://api.ipify.org,https://checkip.amazonaws.com
+
+# Retry behavior for transient failures (HTTP 408/425/429/5xx and network errors).
+max_retries = 3
+retry_backoff = 1.0
+retry_max_delay = 30.0
 ```
 
 `config.ini` and `private.key` are `.gitignore`d and must never be committed.

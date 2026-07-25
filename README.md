@@ -12,6 +12,13 @@ address and updates a DNS record in your TransIP account when the IP changes.
 - Supports `--dry-run` and `--list` modes.
 - Unit tested with mocked API calls.
 
+## Compatibility & Reliability
+
+- Runs on any machine with Python 3.8 or newer. Dependencies are only the standard library plus `requests` and `python-transip`.
+- Retries transient failures (HTTP 408/425/429/5xx and network errors) with exponential backoff and jitter, on both the public IP discovery services and the TransIP API calls. Non-retryable errors (401/403/404, invalid data) fail fast.
+- Fails over across multiple public IP discovery services when one is exhausted.
+- Retry behavior is configurable via `max_retries`, `retry_backoff`, and `retry_max_delay` in `config.ini`.
+
 ## Quick start
 
 See [INSTALL.md](INSTALL.md) for detailed setup instructions.
@@ -55,7 +62,10 @@ private_key_path = ./private.key
 # domain = example.com   # Optional. Uses first domain if omitted.
 recordname = @
 recordtype = A
-ip_services = https://ipecho.net/plain,https://ifconfig.me/ip,https://api.ipify.org
+ip_services = https://ipecho.net/plain,https://ifconfig.me/ip,https://api.ipify.org,https://checkip.amazonaws.com
+max_retries = 3
+retry_backoff = 1.0
+retry_max_delay = 30.0
 ```
 
 `config.ini` and `private.key` are `.gitignore`d and must never be committed.

@@ -12,13 +12,17 @@ import configparser
 import ipaddress
 import logging
 import os
+import random
 import stat
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Callable, TypeVar
 
 import requests
 import transip
+from transip import exceptions as transip_exceptions
 from transip.v6.objects import DnsEntry
 
 
@@ -45,10 +49,107 @@ recordname = @
 recordtype = A
 
 # Comma-separated list of services used to discover the current public IP.
-ip_services = https://ipecho.net/plain
+ip_services = https://ipecho.net/plain,https://ifconfig.me/ip,https://api.ipify.org,https://checkip.amazonaws.com
+
+# Retry behavior for transient failures (HTTP 408/425/429/5xx and network errors).
+# max_retries = total attempts per call, retry_backoff = base delay in seconds
+# (doubled each attempt, plus jitter), retry_max_delay = cap on the delay.
+max_retries = 3
+retry_backoff = 1.0
+retry_max_delay = 30.0
 """
 
 logger = logging.getLogger(__name__)
+
+RETRYABLE_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF = 1.0
+DEFAULT_MAX_DELAY = 30.0
+
+T = TypeVar("T")
+
+
+@dataclass
+class RetrySettings:
+    max_retries: int = DEFAULT_MAX_RETRIES
+    base_delay: float = DEFAULT_BACKOFF
+    max_delay: float = DEFAULT_MAX_DELAY
+
+
+def is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, transip_exceptions.TransIPHTTPError):
+        return exc.response_code in RETRYABLE_HTTP_CODES
+    if isinstance(exc, requests.exceptions.HTTPError):
+        return exc.response is not None and exc.response.status_code in RETRYABLE_HTTP_CODES
+    return isinstance(
+        exc,
+        (
+            transip_exceptions.TransIPIOError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            ConnectionError,
+            TimeoutError,
+            OSError,
+        ),
+    )
+
+
+def retry_call(
+    fn: Callable[[], T],
+    *,
+    settings: RetrySettings,
+    label: str,
+    sleep: Callable[[float], None] = time.sleep,
+    retryable: Callable[[BaseException], bool] = is_retryable,
+) -> T:
+    for attempt in range(1, settings.max_retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not retryable(exc) or attempt == settings.max_retries:
+                raise
+            delay = min(settings.base_delay * 2 ** (attempt - 1), settings.max_delay)
+            delay += random.uniform(0, delay * 0.1)
+            logger.debug(
+                "%s failed (attempt %d/%d): %s; retrying in %.2fs",
+                label,
+                attempt,
+                settings.max_retries,
+                exc,
+                delay,
+            )
+            sleep(delay)
+    raise AssertionError("unreachable")
+
+
+def retry_settings(config: dict[str, str]) -> RetrySettings:
+    return RetrySettings(
+        max_retries=max(1, _parse_config_int(config, "max_retries", DEFAULT_MAX_RETRIES)),
+        base_delay=max(0.0, _parse_config_float(config, "retry_backoff", DEFAULT_BACKOFF)),
+        max_delay=max(0.0, _parse_config_float(config, "retry_max_delay", DEFAULT_MAX_DELAY)),
+    )
+
+
+def _parse_config_int(config: dict[str, str], key: str, default: int) -> int:
+    raw = config.get(key)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s value %r; using default %s", key, raw, default)
+        return default
+
+
+def _parse_config_float(config: dict[str, str], key: str, default: float) -> float:
+    raw = config.get(key)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s value %r; using default %s", key, raw, default)
+        return default
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -79,15 +180,25 @@ def validate_public_ip(value: str) -> str:
     return value
 
 
-def get_public_ip(services: list[str], timeout: int = 30) -> str:
+def get_public_ip(
+    services: list[str],
+    *,
+    timeout: int = 30,
+    settings: RetrySettings | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    if settings is None:
+        settings = RetrySettings()
     errors: list[str] = []
     for url in services:
-        try:
-            logger.debug("Trying IP discovery service: %s", url)
+        def attempt(url: str = url) -> str:
             response = requests.get(url, timeout=timeout)
             response.raise_for_status()
-            candidate = response.text.strip()
-            return validate_public_ip(candidate)
+            return validate_public_ip(response.text.strip())
+
+        try:
+            logger.debug("Trying IP discovery service: %s", url)
+            return retry_call(attempt, settings=settings, label=f"IP service {url}", sleep=sleep)
         except requests.RequestException as exc:
             logger.debug("IP service %s failed: %s", url, exc)
             errors.append(f"{url}: {exc}")
@@ -117,12 +228,19 @@ def find_record(entries: list[DnsEntry], record_name: str, record_type: str) -> 
     raise LookupError(f"No {record_name} {record_type} record found")
 
 
-def select_domain_name(client: transip.TransIP, configured_domain: str | None) -> str:
+def select_domain_name(
+    client: transip.TransIP,
+    configured_domain: str | None,
+    *,
+    settings: RetrySettings | None = None,
+) -> str:
     if configured_domain:
         logger.debug("Using configured domain: %s", configured_domain)
         return configured_domain
 
-    domains = client.domains.list()
+    if settings is None:
+        settings = RetrySettings()
+    domains = retry_call(client.domains.list, settings=settings, label="List domains")
     if not domains:
         raise RuntimeError("No domains found in the TransIP account.")
 
@@ -136,17 +254,21 @@ def update_root_dns_entry(
     client: transip.TransIP,
     config: dict[str, str],
     dry_run: bool = False,
+    *,
+    settings: RetrySettings | None = None,
 ) -> bool:
+    if settings is None:
+        settings = RetrySettings()
     logger.info("Public IP address is: %s", public_ip)
 
     record_name = config.get("recordname", "@") or "@"
     record_type = (config.get("recordtype", "A") or "A").upper()
 
-    domain_name = select_domain_name(client, config.get("domain"))
+    domain_name = select_domain_name(client, config.get("domain"), settings=settings)
     logger.info("Selected domain name is: %s", domain_name)
 
-    domain = client.domains.get(domain_name)
-    dns_entries = domain.dns.list()
+    domain = retry_call(lambda: client.domains.get(domain_name), settings=settings, label=f"Get domain {domain_name}")
+    dns_entries = retry_call(domain.dns.list, settings=settings, label=f"List DNS entries for {domain_name}")
     current_record = find_record(dns_entries, record_name, record_type)
 
     logger.info(
@@ -173,17 +295,20 @@ def update_root_dns_entry(
         return True
 
     current_record.content = public_ip
-    current_record.update()
+    retry_call(current_record.update, settings=settings, label=f"Update {record_name} {record_type} record")
     logger.info("DNS entry updated successfully.")
     return True
 
 
-def list_records(client: transip.TransIP, config: dict[str, str]) -> None:
-    domain_name = select_domain_name(client, config.get("domain"))
+def list_records(client: transip.TransIP, config: dict[str, str], *, settings: RetrySettings | None = None) -> None:
+    if settings is None:
+        settings = RetrySettings()
+    domain_name = select_domain_name(client, config.get("domain"), settings=settings)
     logger.info("Selected domain name is: %s", domain_name)
 
-    domain = client.domains.get(domain_name)
-    for entry in domain.dns.list():
+    domain = retry_call(lambda: client.domains.get(domain_name), settings=settings, label=f"Get domain {domain_name}")
+    dns_entries = retry_call(domain.dns.list, settings=settings, label=f"List DNS entries for {domain_name}")
+    for entry in dns_entries:
         print(f"{entry.name}\t{entry.expire}\t{entry.type}\t{entry.content}")
 
 
@@ -230,15 +355,16 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config)
     try:
         config = read_config(config_path)
+        settings = retry_settings(config)
         client = create_client(config)
 
         if args.list:
-            list_records(client, config)
+            list_records(client, config, settings=settings)
             return 0
 
         services = parse_ip_services(config.get("ip_services") or config.get("ip_url"))
-        public_ip = get_public_ip(services)
-        updated = update_root_dns_entry(public_ip, client, config, dry_run=args.dry_run)
+        public_ip = get_public_ip(services, settings=settings)
+        updated = update_root_dns_entry(public_ip, client, config, dry_run=args.dry_run, settings=settings)
         return 0 if (updated or not args.dry_run) else 0
     except Exception as exc:
         logger.error("%s", exc)
